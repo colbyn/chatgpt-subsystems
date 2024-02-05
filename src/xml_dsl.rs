@@ -103,7 +103,7 @@ fn internal_parse_html_dsl(html: &str) -> HashMap<String, Prompt> {
                 .select(&message_selector)
                 .map(|message_element| {
                     let role = api::Role::from(message_element.attr("role").unwrap_or("user")).unwrap();
-                    let content = message_element.inner_html();
+                    let content = message_element.inner_html().trim().to_string();
                     // let content = unindent::unindent(&content);
                     api::Message{role, content}
                 })
