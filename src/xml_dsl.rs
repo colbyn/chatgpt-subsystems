@@ -18,18 +18,28 @@ pub struct Prompt {
 }
 
 impl Prompt {
-    pub async fn execute<L: FnMut(&str) -> ()>(&self, api_key: &str, logger: Rc<RefCell<L>>) -> Result<String, Box<dyn std::error::Error>> {
-        let outs = self.request.invoke(api_key, logger).await?;
+    pub async fn execute<L: FnMut(&str) -> ()>(
+        &self,
+        api_key: &str,
+        logger: Rc<RefCell<L>>,
+        timeout: std::time::Duration
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let outs = self.request.invoke(api_key, logger, timeout).await?;
         let result = outs
             .into_iter()
             .filter_map(|x| x.choices.first().and_then(|x| x.delta.content.clone()))
             .collect::<String>();
         Ok(result)
     }
-    pub fn execute_blocking<L: FnMut(&str) -> ()>(&self, api_key: &str, logger: Rc<RefCell<L>>) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn execute_blocking<L: FnMut(&str) -> ()>(
+        &self,
+        api_key: &str,
+        logger: Rc<RefCell<L>>,
+        timeout: std::time::Duration
+    ) -> Result<String, Box<dyn std::error::Error>> {
         RUNTIME.with(|rt| {
             rt.borrow().block_on(async {
-                self.execute(api_key, logger).await
+                self.execute(api_key, logger, timeout).await
             })
         })
     }

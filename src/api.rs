@@ -135,9 +135,17 @@ impl Default for ChatRequest {
 }
 
 impl ChatRequest {
-    pub async fn invoke<L: FnMut(&str) -> ()>(&self, api_key: &str, logger: Rc<RefCell<L>>) -> Result<Vec<CompletionChunk>, Box<dyn std::error::Error>> {
+    pub async fn invoke<L: FnMut(&str) -> ()>(
+        &self,
+        api_key: &str,
+        logger: Rc<RefCell<L>>,
+        timeout: std::time::Duration
+    ) -> Result<Vec<CompletionChunk>, Box<dyn std::error::Error>> {
         let url = "https://api.openai.com/v1/chat/completions";
-        let client = reqwest::Client::new();
+        let client = reqwest::ClientBuilder::new()
+            .timeout(timeout)
+            .build()
+            .unwrap();
         let response_stream = client
             .post(url)
             .header("Authorization", format!("Bearer {}", api_key))
