@@ -155,7 +155,7 @@ impl ChatRequest {
         if !response_stream.status().is_success() {
             println!("[CHAR-GPT] FAILED\n```{}\n```", serde_json::to_string_pretty(&self).unwrap())
         }
-        assert!(response_stream.status().is_success());
+        // assert!(response_stream.status().is_success());
         let response_stream = response_stream.bytes_stream();
         tokio::pin!(response_stream);
         let mut results: Vec<CompletionChunk> = Vec::default();
