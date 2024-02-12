@@ -1,133 +1,147 @@
-use std::{path::Path, collections::HashMap, rc::Rc, cell::RefCell};
+use std::{path::Path, str::FromStr};
 
-// use crate::types::{InputWord, WordModel};
-use crate::api;
+use crate::client::{self as api, ChatCompletionsRequestBuilder};
 
-thread_local! {
-    static RUNTIME: RefCell<tokio::runtime::Runtime> = RefCell::new(tokio::runtime::Runtime::new().unwrap());
+#[derive(Debug, Clone)]
+pub struct PromptCollection {
+    prompts: Vec<Prompt>,
 }
 
-
-//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
-// TODO
-//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
 #[derive(Debug, Clone)]
 pub struct Prompt {
-    pub name: String,
-    pub request: api::ChatRequest,
+    pub name: Option<String>,
+    pub configuration: api::ConfigurationBuilder,
+    pub messages: Vec<api::Message>
+}
+
+impl PromptCollection {
+    pub fn open(file_path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
+        let source = std::fs::read_to_string(file_path.as_ref())?;
+        Self::parse(source)
+    } 
+    pub fn parse(contents: impl AsRef<str>) -> Result<Self, Box<dyn std::error::Error>> {
+        // let contents = std::fs::read_to_string(file_path.as_ref());
+        let source = contents.as_ref();
+        let html = scraper::Html::parse_fragment(source);
+        let selector = scraper::Selector::parse("prompt").unwrap();
+        let prompts = html
+            .select(&selector)
+            .filter_map(process_prompt_element)
+            .collect::<Vec<_>>();
+        Ok(PromptCollection { prompts })
+    }
+    pub fn get(&self, prompt_name: impl AsRef<str>) -> Option<Prompt> {
+        let target = prompt_name.as_ref();
+        for prompt in self.prompts.iter() {
+            if let Some(name) = prompt.name.as_ref() {
+                if name == &target {
+                    return Some(prompt.clone());
+                }
+            }
+        }
+        None
+    }
 }
 
 impl Prompt {
-    pub async fn execute<L: FnMut(&str) -> ()>(
-        &self,
-        api_key: &str,
-        logger: Rc<RefCell<L>>,
-        timeout: std::time::Duration
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let outs = self.request.invoke(api_key, logger, timeout).await?;
-        let result = outs
-            .into_iter()
-            .filter_map(|x| x.choices.first().and_then(|x| x.delta.content.clone()))
-            .collect::<String>();
-        Ok(result)
+    pub fn open(file_path: impl AsRef<Path>, prompt_name: impl AsRef<str>) -> Result<Self, api::Error> {
+        let prompt_name = prompt_name.as_ref();
+        let collection = PromptCollection::open(file_path)?;
+        let prompt = collection.get(prompt_name)
+            .ok_or(Box::new(PromptNotFound(prompt_name.to_string())))?;
+        Ok(prompt)
     }
-    pub fn execute_blocking<L: FnMut(&str) -> ()>(
-        &self,
-        api_key: &str,
-        logger: Rc<RefCell<L>>,
-        timeout: std::time::Duration
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        RUNTIME.with(|rt| {
-            rt.borrow().block_on(async {
-                self.execute(api_key, logger, timeout).await
-            })
-        })
+    pub fn parse(contents: impl AsRef<str>, prompt_name: impl AsRef<str>) -> Result<Self, api::Error> {
+        let prompt_name = prompt_name.as_ref();
+        let collection = PromptCollection::parse(contents)?;
+        let prompt = collection.get(prompt_name)
+            .ok_or(Box::new(PromptNotFound(prompt_name.to_string())))?;
+        Ok(prompt)
     }
-    pub fn parse_from(html_source: &str, prompt_name: &str, globals: &dyn liquid::ObjectView) -> Option<Prompt> {
-        let template = liquid::ParserBuilder::with_stdlib()
-            .build().unwrap()
-            .parse(&html_source).unwrap();
-        let html = template.render(&globals).unwrap();
-        return internal_parse_html_dsl(&html).get(prompt_name).map(ToOwned::to_owned)
+    pub fn build_body(&self) -> Option<api::ChatCompletionsBody> {
+        self.configuration.clone().build(self.messages.clone())
     }
-    pub fn read_from(html_path: impl AsRef<Path>, prompt_name: &str, globals: &dyn liquid::ObjectView) -> Option<Prompt> {
-        let html_source = std::fs::read_to_string(html_path.as_ref()).ok()?;
-        Self::parse_from(&html_source, prompt_name, globals)
-    }
-    pub fn print_info(&self) {
-        use colored::Colorize;
-        // let contents = serde_json::to_string_pretty(&self.request).unwrap();
-        println!("{}", format!("model: {}", self.request.model).truecolor(191, 122, 255));
-        println!("{}", format!("stream: {:?}", self.request.stream).truecolor(191, 122, 255));
-        println!("{}", format!("temperature: {:?}", self.request.temperature).truecolor(191, 122, 255));
-        println!("{}", format!("n: {:?}", self.request.n).truecolor(191, 122, 255));
-        println!("{}", format!("max_tokens: {:?}", self.request.max_tokens).truecolor(191, 122, 255));
-        println!("{}", format!("top_p: {:?}", self.request.top_p).truecolor(191, 122, 255));
-        println!("{}", format!("frequency_penalty: {:?}", self.request.frequency_penalty).truecolor(191, 122, 255));
-        println!("{}", format!("presence_penalty: {:?}", self.request.presence_penalty).truecolor(191, 122, 255));
-        println!("{}", format!("logprobs: {:?}", self.request.logprobs).truecolor(191, 122, 255));
-        println!("{}", format!("response_format: {:?}", self.request.response_format).truecolor(191, 122, 255));
-        println!("{}", format!("stop: {:?}", self.request.stop).truecolor(191, 122, 255));
-        for message in self.request.messages.iter() {
-            println!("{} {}", "  ─╼ ROLE:".truecolor(191, 122, 255), serde_json::to_string(&message.role).unwrap());
-            for line in message.content.lines() {
-                println!("{}", &format!("  │ {}", line).truecolor(191, 122, 255));
-            }
-        }
+    pub fn request_builder(&self) -> Option<ChatCompletionsRequestBuilder> {
+        let body = self.build_body()?;
+        let builder = ChatCompletionsRequestBuilder::default().with_body(body);
+        Some(builder)
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct PromptNotFound(pub String);
+impl std::fmt::Display for PromptNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cannot find prompt: {:?}.", self.0)
+    }
+}
+impl std::error::Error for PromptNotFound {}
+
 
 
 //―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
 // TODO
 //―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
-fn internal_parse_html_dsl(html: &str) -> HashMap<String, Prompt> {
-    let fragment = scraper::Html::parse_fragment(html);
-    let promp_selector = scraper::Selector::parse("prompt").unwrap();
+fn process_prompt_element(element: scraper::ElementRef) -> Option<Prompt> {
+    let name = element.attr("name")
+        .map(str::to_string);
+    let model = element.attr("model")
+        .map(str::to_string);
+    let stream = element.attr("stream")
+        .and_then(|x| bool::from_str(&x).ok());
+    let temperature = element.attr("temperature")
+        .and_then(|x| f32::from_str(&x).ok());
+    let n: Option<usize> = element.attr("n")
+        .and_then(|x| usize::from_str(&x).ok());
+    let max_tokens = element.attr("max-tokens")
+        .and_then(|x| usize::from_str(&x).ok());
+    let top_p = element.attr("top-p")
+        .and_then(|x| f32::from_str(&x).ok());
+    let frequency_penalty = element.attr("frequency-penalty")
+        .and_then(|x| f32::from_str(&x).ok());
+    let presence_penalty = element.attr("presence-penalty")
+        .and_then(|x| f32::from_str(&x).ok());
+    let logprobs = element.attr("logprobs")
+        .and_then(|x| bool::from_str(&x).ok());
+    let top_logprobs = element.attr("top-logprobs")
+        .and_then(|x| usize::from_str(&x).ok());
+    let response_format = element
+        .attr("response-format")
+        .and_then(|x| {
+            match x.to_lowercase().as_str() {
+                "json-object" => Some(api::ResponseFormat::json_object()),
+                "json_object" => Some(api::ResponseFormat::json_object()),
+                "text" => Some(api::ResponseFormat::text()),
+                _ => None
+            }
+        });
+    // let stop = element.attr("stop").map(str::to_string);
+    // - * -
+    let mut configuration = api::ConfigurationBuilder::default();
+    configuration.model = model;
+    configuration.stream = stream;
+    configuration.temperature = temperature;
+    configuration.n = n;
+    configuration.max_tokens = max_tokens;
+    configuration.top_p = top_p;
+    configuration.frequency_penalty = frequency_penalty;
+    configuration.presence_penalty = presence_penalty;
+    configuration.logprobs = logprobs;
+    configuration.top_logprobs = top_logprobs;
+    configuration.response_format = response_format;
+    // - * -
     let message_selector = scraper::Selector::parse("message").unwrap();
-    fragment
-        .select(&promp_selector)
-        .filter_map(|prompt_element| {
-            let name = prompt_element.attr("name")?.to_string();
-            let model = prompt_element.attr("model").unwrap_or("gpt-3.5-turbo").to_string();
-            let temperature = prompt_element.attr("temperature")
-                .and_then(|x| x.parse::<f32>().ok());
-            let max_tokens = prompt_element.attr("max-tokens")
-                .and_then(|x| x.parse::<i32>().ok());
-            let top_p = prompt_element.attr("top-p")
-                .and_then(|x| x.parse::<f32>().ok());
-            let frequency_penalty = prompt_element.attr("frequency-penalty")
-                .and_then(|x| x.parse::<f32>().ok());
-            let presence_penalty = prompt_element.attr("presence-penalty")
-                .and_then(|x| x.parse::<f32>().ok());
-            let response_format = prompt_element.attr("response-format")
-                .and_then(|x| {
-                    match x.to_lowercase().as_str() {
-                        "json-object" => Some(api::ResponseFormat::json_object()),
-                        "json_object" => Some(api::ResponseFormat::json_object()),
-                        "text" => Some(api::ResponseFormat::text()),
-                        _ => None
-                    }
-                });
-            let messages = prompt_element
-                .select(&message_selector)
-                .map(|message_element| {
-                    let role = api::Role::from(message_element.attr("role").unwrap_or("user")).unwrap();
-                    let content = message_element.inner_html().trim().to_string();
-                    // let content = unindent::unindent(&content);
-                    api::Message{role, content}
-                })
-                .collect::<Vec<_>>();
-            let mut request = api::ChatRequest::default();
-            request.messages = messages;
-            request.model = model;
-            request.temperature = temperature;
-            request.max_tokens = max_tokens;
-            request.top_p = top_p;
-            request.frequency_penalty = frequency_penalty;
-            request.presence_penalty = presence_penalty;
-            request.response_format = response_format;
-            Some((name.clone(), Prompt {name, request}))
+    let messages = element
+        .select(&message_selector)
+        .map(|message_element| {
+            let role = message_element.attr("role").unwrap_or("user");
+            let role = api::Role::from(role).unwrap();
+            let content = message_element.inner_html().trim().to_string();
+            let content = unindent::unindent(&content);
+            api::Message{role, content}
         })
-        .collect::<HashMap<_, _>>()
+        .collect::<Vec<_>>();
+    // - * -
+    let prompt = Prompt { name, configuration, messages };
+    Some(prompt)
 }
